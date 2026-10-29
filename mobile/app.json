@@ -53,6 +53,16 @@
     "scheme": "qrattendance",
     "experiments": {
       "typedRoutes": false
+    },
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "190eaa57-48e5-409c-9e1f-5f92189012a3"
+      }
     }
   }
 }
