@@ -1,0 +1,21 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# face models (downloaded by scripts/download_models.py)
+backend/models/*.onnx
+
+# mobile (also see mobile/.gitignore)
+mobile/node_modules/
+mobile/.expo/
+mobile/android/
+mobile/ios/
+*.apk
+*.aab

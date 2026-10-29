@@ -1,0 +1,29 @@
+# Render Blueprint: free Docker web service for the FastAPI backend.
+# Database: Neon free Postgres (set DATABASE_URL in the Render dashboard). See docs/DEPLOY_FREE.md.
+services:
+  - type: web
+    name: qr-attendance-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL # Neon "direct" connection string (not the -pooler one)
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: QR_SIGNING_KEY
+        generateValue: true
+      - key: DEVICE_HASH_KEY
+        generateValue: true
+      - key: TEMPLATE_KEYS # format v1:<base64 of 32 random bytes>
+        sync: false
+      - key: TEMPLATE_ACTIVE_KEY_VERSION
+        value: v1
+      - key: FACE_POOL_SIZE # 512 MB free instance: keep one model instance
+        value: "1"
