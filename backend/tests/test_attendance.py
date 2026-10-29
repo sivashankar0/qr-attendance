@@ -157,10 +157,11 @@ def test_tampered_and_old_qr_rejected(world, db):
     assert start(world, world.alice, tampered).json()["reason"] == "SESSION_INVALID"
     assert start(world, world.alice, "garbage-not-a-qr").json()["reason"] == "SESSION_INVALID"
     salt = db.get(AttendanceSession, s_id).qr_secret_ref
-    old, _ = qrsvc.build_qr(db.get(AttendanceSession, s_id).id, salt, now=time.time() - 120)
+    # 5 s rotation + 2 grace windows: a token older than ~15 s is rejected
+    old, _ = qrsvc.build_qr(db.get(AttendanceSession, s_id).id, salt, now=time.time() - 20)
     assert start(world, world.alice, old).json()["reason"] == "SESSION_INVALID"
-    # previous window is still accepted (grace for scan latency)
-    prev, _ = qrsvc.build_qr(db.get(AttendanceSession, s_id).id, salt, now=time.time() - 20)
+    # the previous window is still accepted (grace for scan + network latency)
+    prev, _ = qrsvc.build_qr(db.get(AttendanceSession, s_id).id, salt, now=time.time() - 5)
     assert start(world, world.alice, prev).status_code == 200
 
 

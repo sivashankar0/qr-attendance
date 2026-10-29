@@ -15,8 +15,9 @@ interface Status {
 }
 
 interface Summary {
-  classes: { class_code: string; class_name: string; sessions: number; attended: number }[];
+  classes: { class_code: string; class_name: string; sessions: number; attended: number; weighted_percent: number | null }[];
   history: { status: string }[];
+  overall_weighted_percent: number | null;
 }
 
 export default function StudentHome() {
@@ -63,14 +64,19 @@ export default function StudentHome() {
             ? `${openNow} class session${openNow > 1 ? 's are' : ' is'} open now.`
             : "Scan the QR code on your teacher's screen."}
         </Body>
-        <Button title="Scan QR code" onPress={() => router.push('/student/scan')} />
+        <Button title="Scan QR code" icon="qr-code-outline" onPress={() => router.push('/student/scan')} />
       </Card>
 
       <Card>
         <H2>My classes</H2>
+        {summary?.overall_weighted_percent != null ? (
+          <Body muted>
+            Overall attendance (weighted by class duration): <Text style={{ fontWeight: '800', color: colors.text }}>{summary.overall_weighted_percent}%</Text>
+          </Body>
+        ) : null}
         {summary?.classes.length ? (
           summary.classes.map((c) => {
-            const pct = c.sessions ? Math.round((c.attended / c.sessions) * 100) : 0;
+            const pct = c.weighted_percent ?? (c.sessions ? Math.round((c.attended / c.sessions) * 100) : 0);
             return (
               <ListItem
                 key={c.class_code}
@@ -90,10 +96,6 @@ export default function StudentHome() {
         <Button title="View attendance history" variant="secondary" onPress={() => router.push('/student/history')} />
       </Card>
 
-      <View style={{ gap: space.sm }}>
-        <Button title="Face enrollment & privacy" variant="secondary" onPress={() => router.push('/student/enrollment')} />
-        <Button title="Settings" variant="ghost" onPress={() => router.push('/settings')} />
-      </View>
     </Screen>
   );
 }

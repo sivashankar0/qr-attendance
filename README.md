@@ -12,11 +12,14 @@ QR-based class attendance with **server-side face-assisted verification**, built
 
 ## What it does
 
+**App flow:** landing screen → choose user type (Student / Teacher / Admin-Staff) → Sign in or Sign up (students and
+teachers; new accounts wait for admin approval) → role-specific tabs + hamburger menu + profile avatar (top right).
+
 | Role | In the app |
 |---|---|
 | Student | Log in · enrol face with explicit, versioned consent (or decline → teacher verification) · scan rotating QR · face check with random head-turn prompt · see result + reason · request teacher verification · attendance history and % per class · withdraw consent & delete face data |
-| Teacher | My classes · start session (duration, face required, **restrict to classroom location** 50/100/200 m) · full-screen rotating QR (20 s) with countdown and live counts · live dashboard (present / exception / pending / rejected, requests, shared-phone flag) · manual verification with reason + identity confirmation · close session · export CSV |
-| Admin | Users (create, CSV import, identity verification, password reset, deactivate) · classes & members · exception-rate report · retention job · audit log |
+| Teacher | Tabular dashboard (classes, sessions, student attendance with search/sort/filter/pages) · class timings + duration + attendance weightage · sessions table · weighted reports · start session (duration, face required, **restrict to classroom location** 50/100/200 m) · full-screen rotating QR (**every 5 s**, countdown) with a mid-screen **Close session** button with countdown and live counts · live dashboard (present / exception / pending / rejected, requests, shared-phone flag) · manual verification with reason + identity confirmation · close session · export CSV |
+| Admin | Dashboard · users (create, CSV import, **approve sign-ups**, password-reset requests, identity verification, deactivate) · **face change approvals** · classes & members · exception-rate report · retention job · audit log |
 | Biometric officer | Enrollment review queue, template deletion, opt-outs (alternative method), audit log |
 
 Security highlights: student identity only from the JWT · **classroom geofence** (teacher's GPS at session start + radius; mock locations rejected; student coordinates never stored) · signed rotating QR (no student data/secrets) · single-use,
@@ -24,6 +27,19 @@ student/session-bound nonces · server-only match + liveness decision (client fl
 session_id)` · server timestamps · 3 attempts + cooldown · rate limits + account lockout · refresh-token rotation
 with reuse detection · AES-256-GCM templates in a separate `biometric` schema, no raw images stored · audit log ·
 retention job · FLAG_SECURE on face screens · tokens in Keystore-backed SecureStore.
+
+## Rules worth knowing
+
+- **Face changes:** the first enrollment is free; each later successful re-enrollment uses 1 of **2** changes
+  (deleting and re-enrolling also counts). After that the student requests approval; each admin/officer approval
+  grants exactly one more change. Enforced on the server with row locks.
+- **Weightage:** duration = end − start (crossing midnight allowed); recommended weightage = hours rounded to 0.25
+  (60 min = 1.0); teachers/admins may override (0.25–5). Each session snapshots the weightage when it starts.
+  Attendance % = weighted sessions attended ÷ total session weight. Full rule: `backend/app/services/schedule.py`.
+- **QR:** new HMAC-signed token every 5 s; the server accepts the current + 2 previous windows (≤ ~15 s) and
+  rejects older, tampered, other-session, or closed-session tokens.
+- **Sign-up:** self-registration exists for students and teachers only; accounts stay locked until an admin approves.
+  Forgot password sends a request to the admins (no email reset).
 
 ## Run it locally (Windows, ~10 min)
 
@@ -115,7 +131,8 @@ backend/
   app/services/face/           verifier (SFace / mock) + decisions + encrypted template store
   app/models.py, alembic/      schema (biometric schema separated)
   app/services/geo.py          classroom geofence check
-  tests/                       48 tests
+  app/services/schedule.py     class duration + weightage rule
+  tests/                       62 tests
 mobile/src/
   app/student|teacher|admin/   screens (expo-router)
   components/FaceCapture.tsx   guided capture with oval + prompts

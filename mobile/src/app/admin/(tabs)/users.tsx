@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, View } from 'react-native';
 
-import { Badge, Body, Button, Card, Chip, ErrorText, Field, H2, ListItem, Row, Screen } from '@/components/ui';
+import { Badge, Banner, Body, Button, Card, Chip, ErrorText, Field, H2, ListItem, Row, Screen } from '@/components/ui';
 import { api, ApiError } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { colors, space } from '@/lib/theme';
@@ -14,6 +14,9 @@ interface AdminUser {
   email: string;
   identity_verified: boolean;
   is_active: boolean;
+  signup_status: 'pending' | 'approved' | 'rejected' | null;
+  password_reset_requested: boolean;
+  face_changes: { changes_used: number; changes_allowed: number; changes_remaining: number } | null;
 }
 
 const ROLES = ['student', 'teacher', 'admin', 'biometric_officer'];
@@ -24,6 +27,7 @@ export default function Users() {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [q, setQ] = useState('');
   const [role, setRole] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [selected, setSelected] = useState<AdminUser | null>(null);
   const [mode, setMode] = useState<'list' | 'create' | 'import'>('list');
   const [error, setError] = useState<string | null>(null);
@@ -32,12 +36,13 @@ export default function Users() {
     const params = new URLSearchParams();
     if (q.trim()) params.set('q', q.trim());
     if (role) params.set('role', role);
+    if (statusFilter) params.set('status', statusFilter);
     try {
       setUsers(await api<AdminUser[]>(`/admin/users?${params.toString()}`));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Could not load users.');
     }
-  }, [q, role]);
+  }, [q, role, statusFilter]);
 
   useEffect(() => {
     const t = setTimeout(load, 300);
@@ -61,8 +66,15 @@ export default function Users() {
         </Row>
       ) : null}
       <Field label="Search" value={q} onChangeText={setQ} placeholder="Name, college ID or email" autoCapitalize="none" />
+      {isAdmin ? (
+        <Row style={{ flexWrap: 'wrap' }}>
+          <Chip label="All accounts" selected={!statusFilter} onPress={() => setStatusFilter(null)} />
+          <Chip label="Pending sign-ups" selected={statusFilter === 'pending_signup'} onPress={() => setStatusFilter('pending_signup')} />
+          <Chip label="Password reset requests" selected={statusFilter === 'reset_requested'} onPress={() => setStatusFilter('reset_requested')} />
+        </Row>
+      ) : null}
       <Row style={{ flexWrap: 'wrap' }}>
-        <Chip label="All" selected={!role} onPress={() => setRole(null)} />
+        <Chip label="All roles" selected={!role} onPress={() => setRole(null)} />
         {ROLES.map((r) => (
           <Chip key={r} label={r.replace('_', ' ')} selected={role === r} onPress={() => setRole(r)} />
         ))}
@@ -75,7 +87,15 @@ export default function Users() {
             key={u.id}
             title={`${u.college_id}  ${u.full_name}`}
             subtitle={`${u.role.replace('_', ' ')} · ${u.email}${u.identity_verified ? ' · ID verified' : ''}`}
-            right={!u.is_active ? <Badge status="rejected" label="Inactive" /> : null}
+            right={
+              u.signup_status === 'pending' ? (
+                <Badge status="open" label="Sign-up pending" />
+              ) : u.password_reset_requested ? (
+                <Badge status="open" label="Reset requested" />
+              ) : !u.is_active ? (
+                <Badge status="rejected" label="Inactive" />
+              ) : null
+            }
             onPress={isAdmin ? () => setSelected(u) : undefined}
           />
         ))}
@@ -167,6 +187,20 @@ function EditUser({ user, isAdmin, onDone }: { user: AdminUser; isAdmin: boolean
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const decideSignup = async (decision: 'approve' | 'reject') => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/admin/users/${user.id}/signup`, { body: { decision } });
+      Alert.alert(decision === 'approve' ? 'Sign-up approved' : 'Sign-up rejected');
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Action failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const patch = async (body: Record<string, unknown>, msg?: string) => {
     setBusy(true);
     setError(null);
@@ -195,6 +229,33 @@ function EditUser({ user, isAdmin, onDone }: { user: AdminUser; isAdmin: boolean
           <Badge status={user.identity_verified ? 'present' : 'pending'} label={user.identity_verified ? 'ID verified' : 'ID not verified'} />
         </Row>
       </Card>
+      {isAdmin && user.signup_status === 'pending' ? (
+        <Card>
+          <H2>Sign-up request</H2>
+          <Body muted>This person registered in the app. Approve only if they are a real {user.role} of the college.</Body>
+          <Row>
+            <View style={{ flex: 1 }}>
+              <Button title="Approve" icon="checkmark" onPress={() => decideSignup('approve')} loading={busy} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Button title="Reject" variant="secondary" icon="close" onPress={() => decideSignup('reject')} disabled={busy} />
+            </View>
+          </Row>
+        </Card>
+      ) : null}
+      {user.password_reset_requested ? (
+        <Banner kind="warning" title="This user asked for a password reset">
+          <Body>Set a new password below and give it to them in person.</Body>
+        </Banner>
+      ) : null}
+      {user.face_changes ? (
+        <Card>
+          <H2>Face changes</H2>
+          <Body>
+            Used {user.face_changes.changes_used} of {user.face_changes.changes_allowed} · {user.face_changes.changes_remaining} remaining
+          </Body>
+        </Card>
+      ) : null}
       {isAdmin && user.role === 'student' ? (
         <Card>
           <H2>Identity check</H2>

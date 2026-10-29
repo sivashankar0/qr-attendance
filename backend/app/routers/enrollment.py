@@ -3,13 +3,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.audit import audit
 from app.consent import CONSENT_NOTICE, CONSENT_VERSION
 from app.db import get_db
 from app.deps import require_student
-from app.models import ConsentRecord, FaceTemplate, FaceVerificationOptOut, User
+from app.models import ConsentRecord, FaceChangeRequest, FaceTemplate, FaceVerificationOptOut, User
 from app.ratelimit import limiter, user_or_ip
 from app.reason_codes import AttendanceError
 from app.routers.attendance import decode_frames
@@ -23,6 +24,15 @@ router = APIRouter(prefix="/face", tags=["enrollment"])
 class ConsentIn(BaseModel, extra="forbid"):
     consent_version: str
     accepted: bool
+
+
+class ChangeRequestIn(BaseModel, extra="forbid"):
+    reason: str = Field(min_length=5, max_length=300)
+
+
+LIMIT_MESSAGE = (
+    "You have used all your self-service face changes. Request administrator approval for another change."
+)
 
 
 class EnrollIn(BaseModel, extra="forbid"):
@@ -54,7 +64,23 @@ def enrollment_status(student: User = Depends(require_student), db: Session = De
     history = db.scalars(
         select(ConsentRecord).where(ConsentRecord.student_id == student.id).order_by(ConsentRecord.granted_at.desc())
     ).all()
+    pending = db.scalar(
+        select(FaceChangeRequest).where(
+            FaceChangeRequest.student_id == student.id, FaceChangeRequest.status == "pending"
+        )
+    )
+    last = db.scalar(
+        select(FaceChangeRequest)
+        .where(FaceChangeRequest.student_id == student.id, FaceChangeRequest.status != "pending")
+        .order_by(FaceChangeRequest.decided_at.desc())
+    )
     return {
+        "face_changes": logic.face_change_info(student),
+        "change_request": (
+            {"status": "pending", "created_at": pending.created_at.isoformat()} if pending
+            else {"status": last.status, "decided_at": last.decided_at.isoformat() if last.decided_at else None,
+                  "note": last.decision_note} if last else None
+        ),
         "identity_verified": student.identity_verified_at is not None,
         "consent_active": _active_consent(db, student.id) is not None,
         "current_consent_version": CONSENT_VERSION,
@@ -99,6 +125,16 @@ def enroll(request: Request, body: EnrollIn, student: User = Depends(require_stu
     if _active_consent(db, student.id) is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Consent is required before enrollment")
 
+    # Lock the user row: two parallel enrollments can't both spend the last allowed change.
+    account = db.scalar(
+        select(User).where(User.id == student.id).with_for_update().execution_options(populate_existing=True)
+    )
+    if logic.face_change_info(account)["limit_reached"]:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, {"ok": False, "reason": "FACE_CHANGE_LIMIT", "message": LIMIT_MESSAGE}
+        )
+
     verifier = get_verifier()
     try:
         result = logic.build_template(
@@ -110,8 +146,48 @@ def enroll(request: Request, body: EnrollIn, student: User = Depends(require_stu
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, e.body())
     # Raw images are only in memory for this request and are never written anywhere.
     logic.store_template(db, student.id, result, verifier, actor_id=student.id)
+    # Counting rule: the first enrollment is free; every later successful one is a change -
+    # including after deleting the old template, so withdraw-and-re-enrol can't reset the count.
+    counted = account.face_enrolled_once
+    if counted:
+        account.face_changes_used += 1
+    if result.status == "active":
+        account.face_enrolled_once = True
+    audit(db, "enrollment.change_counted" if counted else "enrollment.initial", student.id, student.id,
+          changes_used=account.face_changes_used, request=request)
     db.commit()
-    return {"ok": True, "status": result.status}
+    return {"ok": True, "status": result.status, "face_changes": logic.face_change_info(account)}
+
+
+@router.get("/change-requests")
+def my_change_requests(student: User = Depends(require_student), db: Session = Depends(get_db)):
+    rows = db.scalars(
+        select(FaceChangeRequest).where(FaceChangeRequest.student_id == student.id)
+        .order_by(FaceChangeRequest.created_at.desc()).limit(20)
+    ).all()
+    return [
+        {"id": str(r.id), "reason": r.reason, "status": r.status, "created_at": r.created_at.isoformat(),
+         "decided_at": r.decided_at.isoformat() if r.decided_at else None, "note": r.decision_note}
+        for r in rows
+    ]
+
+
+@router.post("/change-requests", status_code=201)
+@limiter.limit("5/day", key_func=user_or_ip)
+def request_change(
+    request: Request, body: ChangeRequestIn, student: User = Depends(require_student), db: Session = Depends(get_db)
+):
+    if not logic.face_change_info(student)["limit_reached"]:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "You still have face changes left; no approval needed.")
+    db.add(FaceChangeRequest(student_id=student.id, reason=body.reason.strip()))
+    try:
+        db.flush()
+    except IntegrityError:  # partial unique index: one pending request per student
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "You already have a request waiting for approval.")
+    audit(db, "face_change.request", student.id, student.id, request=request)
+    db.commit()
+    return {"ok": True, "message": "Request sent. An administrator will review it."}
 
 
 @router.delete("/enrollment")

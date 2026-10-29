@@ -19,9 +19,10 @@ class Settings(BaseSettings):
 
     # QR
     qr_signing_key: str
-    qr_rotation_seconds: int = 20
-    # Backend accepts the current window and this many previous windows.
-    qr_grace_windows: int = 1
+    qr_rotation_seconds: int = 5
+    # Backend accepts the current window and this many previous windows (scan + network latency).
+    # With 5 s rotation and 2 grace windows a token is valid for at most ~15 s.
+    qr_grace_windows: int = 2
 
     # Attendance
     challenge_ttl_seconds: int = 120

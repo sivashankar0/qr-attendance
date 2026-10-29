@@ -13,12 +13,10 @@ export default function AdminLayout() {
           contentStyle: { backgroundColor: colors.bg },
         }}
       >
-        <Stack.Screen name="index" options={{ title: 'Administration' }} />
-        <Stack.Screen name="users" options={{ title: 'Users' }} />
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="classes" options={{ title: 'Classes' }} />
-        <Stack.Screen name="class/[id]" options={{ title: 'Class members' }} />
+        <Stack.Screen name="class/[id]" options={{ title: 'Class' }} />
         <Stack.Screen name="enrollments" options={{ title: 'Enrollments & opt-outs' }} />
-        <Stack.Screen name="reports" options={{ title: 'Reports & retention' }} />
         <Stack.Screen name="audit" options={{ title: 'Audit log' }} />
       </Stack>
     </RoleGate>

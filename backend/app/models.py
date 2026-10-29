@@ -5,10 +5,11 @@ app/routers/enrollment.py may touch them.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, time
 
 from sqlalchemy import (
     BigInteger,
+    Time,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -29,6 +30,9 @@ from app.db import Base
 
 ROLES = ("student", "teacher", "admin", "biometric_officer")
 EXCEPTION_REASONS = ("camera_failure", "accessibility", "false_rejection", "not_enrolled", "other")
+SIGNUP_STATUSES = ("pending", "approved", "rejected")
+# Initial enrollment is free; each later successful replacement uses one change.
+FACE_CHANGE_LIMIT = 2
 
 
 def _in(col: str, values: tuple[str, ...]) -> str:
@@ -46,7 +50,10 @@ def _now() -> Mapped[datetime]:
 # ===== Core =====
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint(_in("role", ROLES), name="ck_users_role"),)
+    __table_args__ = (
+        CheckConstraint(_in("role", ROLES), name="ck_users_role"),
+        CheckConstraint(f"signup_status IS NULL OR {_in('signup_status', SIGNUP_STATUSES)}", name="ck_users_signup"),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     role: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -58,6 +65,13 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     failed_logins: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Self sign-up: NULL = created by an admin; pending/rejected accounts cannot log in.
+    signup_status: Mapped[str | None] = mapped_column(String(16))
+    password_reset_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Face re-enrollment limit (enforced server-side in routers/enrollment.py).
+    face_enrolled_once: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    face_changes_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    face_changes_extra: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = _now()
 
 
@@ -82,6 +96,12 @@ class Class(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     teacher_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     term: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Schedule (local wall-clock time). end < start means the class crosses midnight.
+    start_time: Mapped[time | None] = mapped_column(Time)
+    end_time: Mapped[time | None] = mapped_column(Time)
+    days_of_week: Mapped[str | None] = mapped_column(String(32))  # e.g. "MON,WED,FRI"
+    # Attendance weightage per session; NULL = use the duration-based recommendation.
+    weightage: Mapped[float | None] = mapped_column(Float)
 
     teacher: Mapped[User] = relationship()
 
@@ -115,6 +135,8 @@ class AttendanceSession(Base):
     location_lon: Mapped[float | None] = mapped_column(Float)
     location_accuracy_m: Mapped[float | None] = mapped_column(Float)
     geofence_radius_m: Mapped[int | None] = mapped_column(Integer)
+    # Weightage snapshot at session start, so later changes don't rewrite history.
+    weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0, server_default="1")
     created_at: Mapped[datetime] = _now()
 
     klass: Mapped[Class] = relationship()
@@ -263,6 +285,26 @@ class VerificationRequest(Base):
     created_at: Mapped[datetime] = _now()
     resolved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class FaceChangeRequest(Base):
+    """Student request for an extra face change after the self-service limit is used up."""
+
+    __tablename__ = "face_change_requests"
+    __table_args__ = (
+        CheckConstraint(_in("status", ("pending", "approved", "rejected")), name="ck_fcr_status"),
+        # At most one open request per student (blocks request spamming).
+        Index("uq_fcr_one_pending", "student_id", unique=True, postgresql_where="status = 'pending'"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    student_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(String(300), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    created_at: Mapped[datetime] = _now()
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_note: Mapped[str | None] = mapped_column(String(300))
 
 
 class FaceVerificationOptOut(Base):

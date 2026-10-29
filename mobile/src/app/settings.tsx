@@ -56,7 +56,7 @@ export default function Settings() {
           variant="secondary"
           onPress={async () => {
             await logout();
-            router.replace('/login');
+            router.replace('/welcome');
           }}
         />
       </Card>

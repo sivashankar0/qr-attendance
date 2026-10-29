@@ -10,7 +10,7 @@ import { Loading } from './ui';
 export function RoleGate({ roles, children }: { roles: Role[]; children: ReactNode }) {
   const { user, loading } = useAuth();
   if (loading) return <Loading />;
-  if (!user) return <Redirect href="/login" />;
+  if (!user) return <Redirect href="/welcome" />;
   if (!roles.includes(user.role)) return <Redirect href="/" />;
   return <>{children}</>;
 }

@@ -173,5 +173,20 @@ def delete_template(db: Session, student_id: uuid.UUID, actor_id: uuid.UUID, rea
     return True
 
 
+def face_change_info(user) -> dict:
+    """Re-enrollment allowance. Initial enrollment is free; each later successful replacement uses one."""
+    from app.models import FACE_CHANGE_LIMIT
+
+    allowed = FACE_CHANGE_LIMIT + (user.face_changes_extra or 0)
+    used = user.face_changes_used or 0
+    return {
+        "enrolled_once": bool(user.face_enrolled_once),
+        "changes_used": used,
+        "changes_allowed": allowed,
+        "changes_remaining": max(0, allowed - used),
+        "limit_reached": bool(user.face_enrolled_once) and used >= allowed,
+    }
+
+
 def verification_purge_after():
     return utcnow() + timedelta(days=get_settings().verification_result_retention_days)

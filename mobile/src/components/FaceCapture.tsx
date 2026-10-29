@@ -9,7 +9,8 @@ import * as Haptics from 'expo-haptics';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import { usePreventScreenCapture } from 'expo-screen-capture';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, Linking, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { AccessibilityInfo, Linking, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import { colors, space } from '@/lib/theme';
 
@@ -48,6 +49,11 @@ export function FaceCapture({
   const [arrow, setArrow] = useState<'left' | 'right' | undefined>();
   const [error, setError] = useState<string | null>(null);
   const mounted = useRef(true);
+  const { width: winW, height: winH } = useWindowDimensions();
+  // Large, proportional oval: ~82% of the screen width, capped so it fits on short screens and tablets.
+  const ovalW = Math.min(winW * 0.82, winH * 0.46, 380);
+  const ovalH = ovalW * 1.3;
+  const state: 'ready' | 'capturing' = running ? 'capturing' : 'ready';
 
   useEffect(() => {
     mounted.current = true;
@@ -136,16 +142,39 @@ export function FaceCapture({
       {/* oval guide */}
       <View pointerEvents="none" style={StyleSheet.absoluteFill}>
         <View style={styles.ovalWrap}>
-          <View style={[styles.oval, running && { borderColor: colors.success }]} />
+          <View
+            style={[
+              styles.oval,
+              { width: ovalW, height: ovalH, borderRadius: ovalW / 2 },
+              running && { borderColor: colors.success },
+            ]}
+          />
         </View>
       </View>
-      <View style={styles.top}>{header}</View>
+      <View style={styles.top}>
+        {header}
+        <View style={[styles.statePill, state === 'capturing' && { backgroundColor: colors.success }]} accessibilityLiveRegion="polite">
+          <Ionicons name={state === 'capturing' ? 'radio-button-on' : ready ? 'scan-outline' : 'camera-outline'} size={16} color="#fff" />
+          <Text style={styles.stateText}>{state === 'capturing' ? 'Capturing – hold still' : ready ? 'Ready – fit your face in the oval' : 'Opening camera…'}</Text>
+        </View>
+      </View>
       <View style={styles.bottom}>
         <View style={styles.promptBox} accessibilityLiveRegion="assertive">
           {arrow ? <Text style={styles.arrow}>{arrow === 'left' ? '⟵' : '⟶'}</Text> : null}
           <Text style={styles.prompt}>{prompt}</Text>
           {!running ? (
-            <Text style={styles.hint}>Good light on your face · Remove sunglasses or mask if you can · Hold the phone at eye level</Text>
+            <View style={{ gap: 4, marginTop: 4 }}>
+              {[
+                ['sunny-outline', 'Face a window or light – avoid light behind you'],
+                ['glasses-outline', 'Remove sunglasses or mask if you can'],
+                ['phone-portrait-outline', 'Hold the phone at eye level, about an arm’s length away'],
+              ].map(([icon, text]) => (
+                <View key={text} style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                  <Ionicons name={icon as any} size={16} color="#D8DDE6" />
+                  <Text style={styles.hint}>{text}</Text>
+                </View>
+              ))}
+            </View>
           ) : null}
         </View>
         {error ? <Text style={styles.error}>{error}</Text> : null}
@@ -161,19 +190,24 @@ export function FaceCapture({
 }
 
 const styles = StyleSheet.create({
-  ovalWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', marginBottom: 120 },
-  oval: {
-    width: 250,
-    height: 330,
-    borderRadius: 165,
-    borderWidth: 4,
-    borderColor: 'rgba(255,255,255,0.9)',
+  ovalWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', marginBottom: 150 },
+  oval: { borderWidth: 5, borderColor: 'rgba(255,255,255,0.95)', borderStyle: 'dashed' },
+  top: { position: 'absolute', top: space.lg, left: space.lg, right: space.lg, gap: space.sm },
+  statePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(47,91,234,0.9)',
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 999,
   },
-  top: { position: 'absolute', top: space.lg, left: space.lg, right: space.lg },
+  stateText: { color: '#fff', fontWeight: '700', fontSize: 14 },
   bottom: { position: 'absolute', bottom: space.xl, left: space.lg, right: space.lg, gap: space.md },
   promptBox: { backgroundColor: 'rgba(0,0,0,0.65)', borderRadius: 16, padding: space.lg, alignItems: 'center', gap: 6 },
   arrow: { color: '#fff', fontSize: 48, fontWeight: '800' },
   prompt: { color: '#fff', fontSize: 20, fontWeight: '700', textAlign: 'center' },
-  hint: { color: '#D8DDE6', fontSize: 14, textAlign: 'center' },
+  hint: { color: '#D8DDE6', fontSize: 14, flexShrink: 1 },
   error: { color: '#fff', backgroundColor: colors.danger, padding: space.md, borderRadius: 12, fontSize: 15 },
 });

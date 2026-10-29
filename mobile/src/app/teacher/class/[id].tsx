@@ -5,6 +5,8 @@ import { Switch, View } from 'react-native';
 import { Badge, Body, Button, Card, Chip, ErrorText, H2, ListItem, Row, Screen } from '@/components/ui';
 import { api, ApiError } from '@/lib/api';
 import { getFix, LocationError } from '@/lib/location';
+import { TeacherClass } from '@/lib/teacher';
+import { ClassScheduleEditor } from '@/components/ClassScheduleEditor';
 import { fmtDateTime, space } from '@/lib/theme';
 
 interface SessionItem {
@@ -34,11 +36,17 @@ export default function ClassScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [klass, setKlass] = useState<TeacherClass | null>(null);
 
   const load = useCallback(async () => {
     setRefreshing(true);
     try {
-      setSessions(await api<SessionItem[]>(`/teacher/classes/${id}/sessions`));
+      const [ss, cs] = await Promise.all([
+        api<SessionItem[]>(`/teacher/classes/${id}/sessions`),
+        api<TeacherClass[]>('/teacher/classes'),
+      ]);
+      setSessions(ss);
+      setKlass(cs.find((c) => c.id === id) ?? null);
     } finally {
       setRefreshing(false);
     }
@@ -130,6 +138,8 @@ export default function ClassScreen() {
           <Button title="Start session & show QR" onPress={start} loading={busy} />
         </Card>
       )}
+
+      {klass ? <ClassScheduleEditor key={klass.id} endpoint={`/teacher/classes/${id}`} initial={klass} /> : null}
 
       <Card>
         <H2>Past sessions</H2>

@@ -5,10 +5,13 @@ import { api, clearTokens, getRefreshToken, loadTokens, saveTokens, setUnauthori
 interface AuthState {
   user: User | null;
   loading: boolean;
-  login: (username: string, password: string) => Promise<User>;
+  login: (username: string, password: string, role?: LoginRole) => Promise<User>;
   logout: () => Promise<void>;
   reload: () => Promise<void>;
 }
+
+/** User type chosen on the landing screen; 'admin' also covers biometric officers. */
+export type LoginRole = 'student' | 'teacher' | 'admin';
 
 const AuthContext = createContext<AuthState | null>(null);
 
@@ -33,9 +36,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })();
   }, [reload]);
 
-  const login = useCallback(async (username: string, password: string) => {
+  const login = useCallback(async (username: string, password: string, role?: LoginRole) => {
     const data = await api<{ access_token: string; refresh_token: string; user: User }>('/auth/login', {
-      body: { username, password },
+      body: { username, password, ...(role ? { role } : {}) },
     });
     await saveTokens(data.access_token, data.refresh_token);
     setUser(data.user);

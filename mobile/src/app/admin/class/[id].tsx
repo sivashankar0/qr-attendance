@@ -3,7 +3,9 @@ import { useCallback, useState } from 'react';
 import { Alert } from 'react-native';
 
 import { Body, Button, Card, ErrorText, Field, H2, ListItem, Screen } from '@/components/ui';
+import { ClassScheduleEditor } from '@/components/ClassScheduleEditor';
 import { api, ApiError } from '@/lib/api';
+import { TeacherClass } from '@/lib/teacher';
 
 interface Member {
   id: string;
@@ -18,9 +20,12 @@ export default function ClassMembers() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [klass, setKlass] = useState<TeacherClass | null>(null);
 
   const load = useCallback(async () => {
-    setMembers(await api<Member[]>(`/admin/classes/${id}/members`));
+    const [m, cs] = await Promise.all([api<Member[]>(`/admin/classes/${id}/members`), api<TeacherClass[]>('/admin/classes')]);
+    setMembers(m);
+    setKlass(cs.find((c) => c.id === id) ?? null);
   }, [id]);
 
   useFocusEffect(
@@ -62,6 +67,7 @@ export default function ClassMembers() {
   return (
     <Screen>
       <Stack.Screen options={{ title: title ?? 'Class members' }} />
+      {klass ? <ClassScheduleEditor key={klass.id} endpoint={`/admin/classes/${id}`} initial={klass} /> : null}
       <Card>
         <H2>Add students</H2>
         <Field

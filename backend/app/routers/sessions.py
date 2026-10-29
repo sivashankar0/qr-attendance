@@ -32,7 +32,9 @@ from app.models import (
     VerificationRequest,
 )
 from app.security import utcnow
+from app.routers.admin import ScheduleIn, apply_schedule, class_out
 from app.services import qr
+from app.services import schedule as sched
 from app.services.geo import LocationIn, validate_teacher_location
 from app.reason_codes import AttendanceError
 from app.services.attendance import session_state
@@ -74,8 +76,13 @@ def _owned_session(db: Session, session_id: uuid.UUID, teacher: User) -> Attenda
 
 
 def _session_out(s: AttendanceSession) -> dict:
+    ended = s.closed_at or s.expires_at
     return {
         "id": str(s.id),
+        "weight": s.weight,
+        "ends_at": ended.isoformat(),
+        "closed_at": s.closed_at.isoformat() if s.closed_at else None,
+        "duration_minutes": max(0, round((ended - s.starts_at).total_seconds() / 60)),
         "class_id": str(s.class_id),
         "class_code": s.klass.code,
         "class_name": s.klass.name,
@@ -88,6 +95,10 @@ def _session_out(s: AttendanceSession) -> dict:
     }
 
 
+class TeacherClassUpdate(ScheduleIn):
+    clear_weightage: bool = False
+
+
 @router.get("/teacher/classes")
 def my_classes(teacher: User = Depends(require_teacher), db: Session = Depends(get_db)):
     rows = db.execute(
@@ -97,9 +108,108 @@ def my_classes(teacher: User = Depends(require_teacher), db: Session = Depends(g
         .group_by(Class.id)
         .order_by(Class.code)
     ).all()
-    return [
-        {"id": str(c.id), "code": c.code, "name": c.name, "term": c.term, "student_count": n} for c, n in rows
-    ]
+    latest = {}
+    if rows:
+        for s in db.scalars(
+            select(AttendanceSession)
+            .where(AttendanceSession.class_id.in_([c.id for c, _ in rows]))
+            .order_by(AttendanceSession.starts_at.desc())
+        ):
+            latest.setdefault(s.class_id, s)
+    out = []
+    for c, n in rows:
+        s = latest.get(c.id)
+        out.append({
+            **class_out(c, student_count=n),
+            "latest_session": {"id": str(s.id), "status": session_state(s), "starts_at": s.starts_at.isoformat()}
+            if s else None,
+        })
+    return out
+
+
+@router.patch("/teacher/classes/{class_id}")
+def update_my_class(
+    class_id: uuid.UUID, body: TeacherClassUpdate, request: Request, teacher: User = Depends(require_teacher),
+    db: Session = Depends(get_db),
+):
+    """Teachers may set the schedule and weightage of their own classes only."""
+    klass = get_owned_class(db, class_id, teacher)
+    apply_schedule(klass, body, body.model_fields_set, body.clear_weightage)
+    audit(db, "class.schedule_update", teacher.id, klass.id, fields=sorted(body.model_fields_set), request=request)
+    db.commit()
+    return class_out(klass)
+
+
+@router.get("/teacher/sessions")
+def my_sessions(
+    class_id: uuid.UUID | None = None,
+    limit: int = 200,
+    teacher: User = Depends(require_teacher),
+    db: Session = Depends(get_db),
+):
+    stmt = (
+        select(AttendanceSession)
+        .join(Class, Class.id == AttendanceSession.class_id)
+        .where(Class.teacher_id == teacher.id)
+        .order_by(AttendanceSession.starts_at.desc())
+        .limit(min(max(limit, 1), 500))
+    )
+    if class_id:
+        stmt = stmt.where(AttendanceSession.class_id == class_id)
+    sessions = db.scalars(stmt).all()
+    ids = [s.id for s in sessions]
+    present = dict(db.execute(
+        select(AttendanceRecord.session_id, func.count()).where(AttendanceRecord.session_id.in_(ids))
+        .group_by(AttendanceRecord.session_id)
+    ).all()) if ids else {}
+    members = dict(db.execute(
+        select(ClassMember.class_id, func.count()).where(ClassMember.class_id.in_({s.class_id for s in sessions}))
+        .group_by(ClassMember.class_id)
+    ).all()) if ids else {}
+    out = []
+    for s in sessions:
+        total = members.get(s.class_id, 0)
+        n = present.get(s.id, 0)
+        out.append({**_session_out(s), "present_count": n, "total_students": total,
+                    "attendance_percent": round(n / total * 100, 1) if total else None})
+    return out
+
+
+@router.get("/teacher/classes/{class_id}/report")
+def class_report(class_id: uuid.UUID, teacher: User = Depends(require_teacher), db: Session = Depends(get_db)):
+    """Per-student attendance for one class, weighted by each session's weightage snapshot."""
+    klass = get_owned_class(db, class_id, teacher)
+    sessions = db.scalars(
+        select(AttendanceSession).where(AttendanceSession.class_id == klass.id, AttendanceSession.status != "cancelled")
+    ).all()
+    total_weight = sum(s.weight for s in sessions)
+    weight_of = {s.id: s.weight for s in sessions}
+    students = db.scalars(
+        select(User).join(ClassMember, ClassMember.student_id == User.id)
+        .where(ClassMember.class_id == klass.id).order_by(User.college_id)
+    ).all()
+    records = db.execute(
+        select(AttendanceRecord.student_id, AttendanceRecord.session_id, AttendanceRecord.status)
+        .where(AttendanceRecord.session_id.in_(list(weight_of)))
+    ).all() if sessions else []
+    per: dict = {}
+    for sid, sess, st in records:
+        p = per.setdefault(sid, {"attended": 0, "weight": 0.0, "exceptions": 0})
+        p["attended"] += 1
+        p["weight"] += weight_of[sess]
+        p["exceptions"] += st == "present_exception"
+    rows = []
+    for u in students:
+        p = per.get(u.id, {"attended": 0, "weight": 0.0, "exceptions": 0})
+        rows.append({
+            "student_id": str(u.id), "college_id": u.college_id, "full_name": u.full_name,
+            "attended": p["attended"], "sessions": len(sessions), "exceptions": p["exceptions"],
+            "weighted_attended": round(p["weight"], 2), "total_weight": round(total_weight, 2),
+            "percent": round(p["weight"] / total_weight * 100, 1) if total_weight else None,
+        })
+    return {"class": class_out(klass, student_count=len(students)), "sessions": len(sessions),
+            "total_weight": round(total_weight, 2), "students": rows,
+            "rule": "percent = weighted attended / total weight of non-cancelled sessions"}
 
 
 @router.get("/teacher/classes/{class_id}/sessions")
@@ -161,6 +271,7 @@ def create_session(
         status="open",
         face_required=body.face_required,
         qr_secret_ref=secrets.token_hex(16),
+        weight=sched.effective_weight(klass),
         location_lat=body.location.latitude if body.location else None,
         location_lon=body.location.longitude if body.location else None,
         location_accuracy_m=body.location.accuracy if body.location else None,

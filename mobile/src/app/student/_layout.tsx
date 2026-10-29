@@ -13,12 +13,10 @@ export default function StudentLayout() {
           contentStyle: { backgroundColor: colors.bg },
         }}
       >
-        <Stack.Screen name="index" options={{ title: 'Home' }} />
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="scan" options={{ title: 'Scan QR', headerShown: false }} />
         <Stack.Screen name="verify" options={{ title: 'Face verification', headerShown: false, gestureEnabled: false }} />
         <Stack.Screen name="result" options={{ title: 'Result', headerBackVisible: false, gestureEnabled: false }} />
-        <Stack.Screen name="history" options={{ title: 'My attendance' }} />
-        <Stack.Screen name="enrollment" options={{ title: 'Face enrollment' }} />
         <Stack.Screen name="enroll" options={{ title: 'Enrol your face' }} />
       </Stack>
     </RoleGate>

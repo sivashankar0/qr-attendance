@@ -127,6 +127,8 @@ def my_attendance(student: User = Depends(require_student), db: Session = Depend
             Class.name,
             func.count(AttendanceSession.id),
             func.count(AttendanceRecord.id),
+            func.coalesce(func.sum(AttendanceSession.weight), 0),
+            func.coalesce(func.sum(AttendanceSession.weight).filter(AttendanceRecord.id.is_not(None)), 0),
         )
         .join(ClassMember, (ClassMember.class_id == Class.id) & (ClassMember.student_id == student.id))
         .outerjoin(
@@ -139,10 +141,14 @@ def my_attendance(student: User = Depends(require_student), db: Session = Depend
         .group_by(Class.id)
         .order_by(Class.code)
     ).all()
+    all_w = sum(float(r[4]) for r in summary)
+    got_w = sum(float(r[5]) for r in summary)
     return {
         "history": history,
         "classes": [
-            {"class_code": code, "class_name": name, "sessions": total, "attended": attended}
-            for code, name, total, attended in summary
+            {"class_code": code, "class_name": name, "sessions": total, "attended": attended,
+             "weighted_percent": round(float(gw) / float(tw) * 100, 1) if tw else None}
+            for code, name, total, attended, tw, gw in summary
         ],
+        "overall_weighted_percent": round(got_w / all_w * 100, 1) if all_w else None,
     }

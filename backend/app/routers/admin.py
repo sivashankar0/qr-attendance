@@ -17,6 +17,7 @@ from app.deps import require_admin, require_staff_admin
 from app.jobs.retention import run_retention
 from app.models import (
     EXCEPTION_REASONS,
+    FaceChangeRequest,
     ROLES,
     AttendanceRecord,
     AttendanceSession,
@@ -29,6 +30,7 @@ from app.models import (
 )
 from app.routers.auth import user_out
 from app.security import hash_password, utcnow
+from app.services import schedule as sched
 from app.services.face import logic
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -53,11 +55,64 @@ class ImportIn(BaseModel):
     csv_text: str = Field(max_length=2_000_000)
 
 
-class ClassCreate(BaseModel):
+class ScheduleIn(BaseModel):
+    start_time: str | None = Field(default=None, description="HH:MM 24h")
+    end_time: str | None = None
+    days_of_week: str | None = Field(default=None, max_length=32, description="e.g. MON,WED,FRI")
+    weightage: float | None = None
+
+
+class ClassCreate(ScheduleIn):
     code: str = Field(min_length=1, max_length=32)
     name: str = Field(min_length=1, max_length=200)
     term: str = Field(min_length=1, max_length=32)
     teacher_id: uuid.UUID
+
+
+class ClassUpdate(ScheduleIn):
+    name: str | None = Field(default=None, max_length=200)
+    teacher_id: uuid.UUID | None = None
+    clear_weightage: bool = False
+
+
+class SignupDecisionIn(BaseModel):
+    decision: str  # approve | reject
+
+
+class FaceChangeDecisionIn(BaseModel):
+    decision: str  # approve | reject
+    note: str | None = Field(default=None, max_length=300)
+
+
+def apply_schedule(c, body: ScheduleIn, fields_set: set[str], clear_weightage: bool = False) -> None:
+    """Validate and apply schedule/weightage fields that were sent. Raises 400 on invalid input."""
+    try:
+        if "start_time" in fields_set:
+            c.start_time = sched.parse_hhmm(body.start_time)
+        if "end_time" in fields_set:
+            c.end_time = sched.parse_hhmm(body.end_time)
+        if "days_of_week" in fields_set:
+            c.days_of_week = sched.normalise_days(body.days_of_week)
+        if "weightage" in fields_set and body.weightage is not None:
+            c.weightage = sched.validate_weight(body.weightage)
+        if clear_weightage:
+            c.weightage = None
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    if (c.start_time is None) != (c.end_time is None):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Set both start and end time, or neither")
+    if c.start_time is not None and sched.duration_minutes(c.start_time, c.end_time) is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Start and end time cannot be the same")
+
+
+def class_out(c, teacher_name: str | None = None, student_count: int | None = None) -> dict:
+    out = {"id": str(c.id), "code": c.code, "name": c.name, "term": c.term, "teacher_id": str(c.teacher_id),
+           **sched.schedule_out(c)}
+    if teacher_name is not None:
+        out["teacher_name"] = teacher_name
+    if student_count is not None:
+        out["student_count"] = student_count
+    return out
 
 
 class MembersIn(BaseModel):
@@ -74,7 +129,14 @@ class OptOutIn(BaseModel):
 
 
 def _admin_user_out(u: User) -> dict:
-    return {**user_out(u), "is_active": u.is_active, "created_at": u.created_at.isoformat()}
+    return {
+        **user_out(u),
+        "is_active": u.is_active,
+        "created_at": u.created_at.isoformat(),
+        "signup_status": u.signup_status,
+        "password_reset_requested": u.password_reset_requested_at is not None,
+        "face_changes": logic.face_change_info(u) if u.role == "student" else None,
+    }
 
 
 def _new_user(db: Session, body: UserCreate) -> User:
@@ -92,9 +154,37 @@ def _new_user(db: Session, body: UserCreate) -> User:
 
 
 # ---------------- users ----------------
+@router.get("/summary")
+def summary(_: User = Depends(require_staff_admin), db: Session = Depends(get_db)):
+    """Counts for the admin dashboard."""
+    by_role = dict(db.execute(select(User.role, func.count()).where(User.is_active.is_(True)).group_by(User.role)).all())
+    today = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    return {
+        "users": {r: by_role.get(r, 0) for r in ROLES},
+        "pending_signups": db.scalar(select(func.count(User.id)).where(User.signup_status == "pending")),
+        "password_reset_requests": db.scalar(
+            select(func.count(User.id)).where(User.password_reset_requested_at.is_not(None))
+        ),
+        "pending_face_changes": db.scalar(
+            select(func.count(FaceChangeRequest.id)).where(FaceChangeRequest.status == "pending")
+        ),
+        "pending_enrollment_reviews": db.scalar(
+            select(func.count(FaceTemplate.id)).where(FaceTemplate.status == "pending_review")
+        ),
+        "classes": db.scalar(select(func.count(Class.id))),
+        "open_sessions": db.scalar(
+            select(func.count(AttendanceSession.id)).where(AttendanceSession.status == "open", AttendanceSession.expires_at > func.now())
+        ),
+        "attendance_today": db.scalar(
+            select(func.count(AttendanceRecord.id)).where(AttendanceRecord.marked_at >= today)
+        ),
+    }
+
+
 @router.get("/users")
 def list_users(
     role: str | None = None,
+    status_filter: str | None = Query(default=None, alias="status", description="pending_signup | reset_requested"),
     q: str | None = Query(default=None, max_length=100),
     _: User = Depends(require_staff_admin),
     db: Session = Depends(get_db),
@@ -102,6 +192,10 @@ def list_users(
     stmt = select(User).order_by(User.role, User.college_id).limit(500)
     if role:
         stmt = stmt.where(User.role == role)
+    if status_filter == "pending_signup":
+        stmt = stmt.where(User.signup_status == "pending")
+    elif status_filter == "reset_requested":
+        stmt = stmt.where(User.password_reset_requested_at.is_not(None))
     if q:
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(User.full_name.ilike(like), User.college_id.ilike(like), User.email.ilike(like)))
@@ -167,10 +261,78 @@ def update_user(
     if body.new_password:
         u.password_hash = hash_password(body.new_password)
         u.failed_logins, u.locked_until = 0, None
+        u.password_reset_requested_at = None
         changes["password_reset"] = True
     audit(db, "user.update", admin.id, u.id, request=request, **changes)
     db.commit()
     return _admin_user_out(u)
+
+
+@router.post("/users/{user_id}/signup")
+def decide_signup(
+    user_id: uuid.UUID, body: SignupDecisionIn, request: Request, admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    u = db.get(User, user_id)
+    if u is None or u.signup_status != "pending":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No pending sign-up for this user")
+    if body.decision == "approve":
+        u.signup_status, u.is_active = "approved", True
+    elif body.decision == "reject":
+        u.signup_status, u.is_active = "rejected", False
+    else:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "decision must be approve or reject")
+    audit(db, "signup.decide", admin.id, u.id, decision=body.decision, request=request)
+    db.commit()
+    return _admin_user_out(u)
+
+
+# ---------------- face change approvals ----------------
+@router.get("/face-change-requests")
+def list_face_change_requests(
+    status_filter: str | None = Query(default="pending", alias="status"),
+    _: User = Depends(require_staff_admin),
+    db: Session = Depends(get_db),
+):
+    stmt = (
+        select(FaceChangeRequest, User)
+        .join(User, User.id == FaceChangeRequest.student_id)
+        .order_by(FaceChangeRequest.created_at.desc())
+        .limit(300)
+    )
+    if status_filter and status_filter != "all":
+        stmt = stmt.where(FaceChangeRequest.status == status_filter)
+    return [
+        {"id": str(r.id), "student_id": str(u.id), "college_id": u.college_id, "full_name": u.full_name,
+         "reason": r.reason, "status": r.status, "created_at": r.created_at.isoformat(),
+         "decided_at": r.decided_at.isoformat() if r.decided_at else None, "note": r.decision_note,
+         "face_changes": logic.face_change_info(u)}
+        for r, u in db.execute(stmt)
+    ]
+
+
+@router.post("/face-change-requests/{request_id}/decide")
+def decide_face_change(
+    request_id: uuid.UUID, body: FaceChangeDecisionIn, request: Request,
+    officer: User = Depends(require_staff_admin), db: Session = Depends(get_db),
+):
+    # Row lock: a double-tap can't approve twice and grant two extra changes.
+    r = db.scalar(select(FaceChangeRequest).where(FaceChangeRequest.id == request_id).with_for_update())
+    if r is None or r.status != "pending":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No pending request with this id")
+    if body.decision not in ("approve", "reject"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "decision must be approve or reject")
+    r.status = "approved" if body.decision == "approve" else "rejected"
+    r.decided_by, r.decided_at = officer.id, utcnow()
+    r.decision_note = (body.note or "").strip() or None
+    if r.status == "approved":
+        student = db.scalar(
+            select(User).where(User.id == r.student_id).with_for_update().execution_options(populate_existing=True)
+        )
+        student.face_changes_extra += 1  # exactly one additional change per approval
+    audit(db, "face_change.decide", officer.id, r.student_id, decision=r.status, request=request)
+    db.commit()
+    return {"ok": True, "status": r.status}
 
 
 # ---------------- classes ----------------
@@ -183,11 +345,7 @@ def list_classes(_: User = Depends(require_admin), db: Session = Depends(get_db)
         .group_by(Class.id, User.full_name)
         .order_by(Class.term.desc(), Class.code)
     ).all()
-    return [
-        {"id": str(c.id), "code": c.code, "name": c.name, "term": c.term, "teacher_id": str(c.teacher_id),
-         "teacher_name": t, "student_count": n}
-        for c, t, n in rows
-    ]
+    return [class_out(c, t, n) for c, t, n in rows]
 
 
 @router.post("/classes", status_code=201)
@@ -196,6 +354,7 @@ def create_class(body: ClassCreate, request: Request, admin: User = Depends(requ
     if teacher is None or teacher.role != "teacher":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "teacher_id must be a teacher")
     c = Class(code=body.code.strip().upper(), name=body.name.strip(), term=body.term.strip(), teacher_id=teacher.id)
+    apply_schedule(c, body, body.model_fields_set)
     db.add(c)
     try:
         db.flush()
@@ -204,7 +363,28 @@ def create_class(body: ClassCreate, request: Request, admin: User = Depends(requ
         raise HTTPException(status.HTTP_409_CONFLICT, "Class code already exists for this term")
     audit(db, "class.create", admin.id, c.id, request=request)
     db.commit()
-    return {"id": str(c.id), "code": c.code, "name": c.name, "term": c.term}
+    return class_out(c)
+
+
+@router.patch("/classes/{class_id}")
+def update_class(
+    class_id: uuid.UUID, body: ClassUpdate, request: Request, admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    c = db.get(Class, class_id)
+    if c is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Class not found")
+    if body.name is not None:
+        c.name = body.name.strip()
+    if body.teacher_id is not None:
+        t = db.get(User, body.teacher_id)
+        if t is None or t.role != "teacher":
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "teacher_id must be a teacher")
+        c.teacher_id = t.id
+    apply_schedule(c, body, body.model_fields_set, body.clear_weightage)
+    audit(db, "class.update", admin.id, c.id, fields=sorted(body.model_fields_set), request=request)
+    db.commit()
+    return class_out(c)
 
 
 @router.get("/classes/{class_id}/members")
@@ -286,6 +466,9 @@ def review_enrollment(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No enrollment pending review")
     if body.decision == "approve":
         tpl.status = "active"
+        student = db.get(User, student_id)
+        if student is not None:
+            student.face_enrolled_once = True
     elif body.decision == "reject":
         logic.delete_template(db, student_id, officer.id, reason="review_rejected")
     else:

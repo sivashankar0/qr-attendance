@@ -3,7 +3,7 @@
 Legend: **Auto** = covered by `backend/tests` (run `pytest`), **Manual** = must be done on real phones /
 people before rollout, **Open** = not implemented.
 
-Automated suite: **48 tests, all passing** (PostgreSQL test DB, mock verifier + real SFace smoke tests).
+Automated suite: **62 tests, all passing** (PostgreSQL test DB, mock verifier + real SFace smoke tests).
 
 ## 14.1 Functional
 | Check | Status | Test |
@@ -17,6 +17,21 @@ Automated suite: **48 tests, all passing** (PostgreSQL test DB, mock verifier + 
 | Tampered / old rotated QR → `SESSION_INVALID` | Auto | `test_tampered_and_old_qr_rejected` |
 | Not in class → `NOT_IN_CLASS` | Auto | `test_student_not_in_class` |
 | Phone clock change does not affect time | By design | timestamps are DB `now()`; client time is never sent |
+
+## v2 enhancements (`tests/test_enhancements.py`)
+| Check | Status |
+|---|---|
+| Sign-up pending until admin approves; rejected cannot log in; no admin self-sign-up; duplicate ID → 409 | Auto |
+| Login enforces the selected user type with the same generic error (no tokens issued) | Auto |
+| Forgot password: same response for unknown users; flags account for admin; cleared on reset | Auto |
+| Profile returns only the caller's own role-specific data | Auto |
+| Face changes: first free, 2 changes, delete+re-enrol still counts, limit → 403, one pending request, approval grants exactly one (double-approve blocked), decider + timestamp stored | Auto |
+| Concurrent enrollments cannot exceed the limit (row lock) | Auto |
+| Schedule: duration incl. crossing midnight, validation, teacher own-class only, admin edit | Auto |
+| Weightage: recommendation, override range, snapshot per session, weighted % in report and student summary | Auto |
+| Teacher sessions table counts/percentages; other teacher sees nothing | Auto |
+| QR rotates every 5 s; token valid ≤ ~15 s; QR endpoint 409 after close; closed-session token rejected | Auto |
+| Mobile UI (landing, auth, tabs, hamburger, tables, enlarged oval, mid-screen Close) on a real phone | **Manual** |
 
 ## Location restriction (geofence)
 | Check | Status |
